@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Sandbox</title>
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'none'; script-src 'unsafe-eval' 'unsafe-inline' https://unpkg.com; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'">
+    <style>html,body,#root{height:100%;margin:0;font-family:system-ui,sans-serif}</style>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script crossorigin src="https://unpkg.com/@babel/standalone@7.26.3/babel.min.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // Minimal ESM-to-CJS preprocessor
+      function transpile(code) {
+        code = code.replace(/^\s*import\s+[^;]+;?\s*$/gm, '');
+        code = code.replace(/export\s+default\s+function\s+([A-Za-z0-9_]+)\s*\(/g, 'module.exports.default = function $1(');
+        code = code.replace(/export\s+default\s+([A-Za-z0-9_]+)\s*;?/g, 'module.exports.default = $1;');
+        return code;
+      }
+
+      // Error boundary to catch render/update errors
+      class Boundary extends React.Component {
+        constructor(p){ super(p); this.state = { err: null }; }
+        componentDidCatch(err, info) {
+          this.setState({ err });
+          parent.postMessage({ type: 'render:error', message: err?.message || String(err), info: String(info?.componentStack||'') }, '*');
+        }
+        render(){
+          if (this.state.err) return React.createElement('div', { style: { padding: 12 }}, 'Recovery mode…');
+          return this.props.children;
+        }
+      }
+
+      // Global error hooks (events, promises)
+      window.addEventListener('error', (e) => {
+        parent.postMessage({ type: 'render:error', message: e?.error?.message || e?.message || 'Script error' }, '*');
+      });
+      window.addEventListener('unhandledrejection', (e) => {
+        const msg = (e && e.reason && (e.reason.message || String(e.reason))) || 'Unhandled promise rejection';
+        parent.postMessage({ type: 'render:error', message: msg }, '*');
+      });
+
+      const render = ({ code, props }) => {
+        try {
+          const exports = {};
+          const module = { exports };
+          const transpiled = transpile(String(code || ''));
+          const compiled = window.Babel
+            ? window.Babel.transform(transpiled, { presets: ['react'] }).code
+            : transpiled;
+          // eslint-disable-next-line no-new-func
+          const fn = new Function('React','module','exports','props', compiled + '\nreturn module.exports;');
+          const mod = fn(window.React, module, exports, props);
+          const Comp = mod?.default || mod?.Component;
+          if (!Comp) throw new Error('No default export found.');
+
+          const rootEl = document.getElementById('root');
+          const root = window.ReactDOM.createRoot(rootEl);
+          const tree = React.createElement(Boundary, null, React.createElement(Comp, props || {}));
+          root.render(tree);
+
+          parent.postMessage({ type: 'render:ok' }, '*');
+        } catch (err) {
+          parent.postMessage({ type: 'render:error', message: err?.message || String(err) }, '*');
+        }
+      };
+
+      window.addEventListener('message', (e) => {
+        if (!e?.data) return;
+        if (e.data.type === 'render') render(e.data.payload);
+      });
+    </script>
+  </body>
+</html>
