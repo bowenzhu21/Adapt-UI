@@ -1,3 +1,7 @@
+import NodeCache from 'node-cache';
+
+const cache = new NodeCache({ stdTTL: 300 }); // Cache TTL: 5 minutes
+
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
 type ChatMsg = { role: 'system'|'user'|'assistant'; content: string };
@@ -10,9 +14,17 @@ export async function groqChat(model: string, messages: ChatMsg[], temperature =
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) throw new Error('Missing GROQ_API_KEY');
 
+  const cacheKey = JSON.stringify({ model, messages, temperature });
+  const cachedResponse = cache.get<string>(cacheKey);
+  if (cachedResponse) {
+    console.log('Returning cached response');
+    return cachedResponse;
+  }
+
   let attempts = 0;
   const maxAttempts = 5;
   const baseDelay = 2000; // 2 seconds
+  const maxRetryAfter = 60; // Cap retry-after at 60 seconds
 
   while (attempts < maxAttempts) {
     attempts += 1;
@@ -41,11 +53,12 @@ export async function groqChat(model: string, messages: ChatMsg[], temperature =
       type GroqResponse = { choices?: Array<{ message?: { content?: string } }> };
       const data = json as GroqResponse;
       const content = data?.choices?.[0]?.message?.content ?? '';
+      cache.set(cacheKey, content); // Cache the response
       return String(content);
     }
 
     if (res.status === 429) {
-      const retryAfter = parseInt(res.headers.get('Retry-After') || '0', 10) * 1000;
+      const retryAfter = Math.min(parseInt(res.headers.get('Retry-After') || '0', 10), maxRetryAfter) * 1000;
       const waitTime = retryAfter || baseDelay * attempts;
       console.warn(`Rate limit hit. Retrying in ${waitTime / 1000}s...`);
       await delay(waitTime);

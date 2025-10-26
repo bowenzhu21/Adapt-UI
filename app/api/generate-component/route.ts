@@ -23,10 +23,9 @@ export async function POST(req: Request) {
     return new Response(JSON.stringify({ error: 'Missing prompt' }), { status: 400 });
   }
 
-  const sys =
-`You are an expert React 18 + TypeScript UI generator.
+  const sys = `You are an expert TypeScript UI generator.
 
-Output ONLY a single self-contained component module that can be evaluated with:
+Output ONLY a single self-contained TypeScript file that can be evaluated with:
 new Function('React','module','exports','props', code)
 
 Constraints:
@@ -36,9 +35,14 @@ Constraints:
 - At the end, ensure there is "module.exports.default = <ComponentName>;".
 - The component must render without needing network, localStorage, or document/window access.
 - Keep it 80–200 lines when possible. Prefer inline styles or minimal Tailwind-like class strings (but no imports).
-- If mood info is provided, reflect it subtly with colors or text copy.
+- For interactive components (e.g., games like Snake):
+  - Implement a game loop using React hooks (e.g., useEffect with requestAnimationFrame).
+  - Handle keyboard input for controlling the game.
+  - Use state to manage the game board, snake position, and food.
+  - Include collision detection and game-over logic.
+  - Ensure smooth animations and responsive design.
 
-Return ONLY the code in a single block, nothing else.`;
+Return ONLY the code in a single TypeScript file, nothing else.`;
 
   const usrParts = [
     `User request: ${prompt}`,
