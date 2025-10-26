@@ -29,13 +29,23 @@ export default function Navbar() {
         <Link className="btn-ghost" href="/sandbox">Sandbox</Link>
         {email ? (
           <>
-            <span className="text-sm opacity-70 hidden sm:inline">{email}</span>
             <button onClick={signOut} className="btn-primary">Sign out</button>
           </>
         ) : (
           <>
             <Link className="btn-ghost" href="/signin">Sign in</Link>
-            <Link className="btn-primary" href="/signup">Create account</Link>
+            <Link
+              className="btn-primary"
+              href="/signup"
+              onClick={(e) => {
+                if (email) {
+                  e.preventDefault();
+                  alert('You are already signed in.');
+                }
+              }}
+            >
+              Create account
+            </Link>
           </>
         )}
       </nav>

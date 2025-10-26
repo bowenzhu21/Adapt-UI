@@ -12,15 +12,14 @@ export default function Home() {
         <p className="text-xs uppercase tracking-widest text-white/60">Demo</p>
         <h1 className="text-4xl md:text-6xl font-bold leading-tight mt-2">
           Generate interfaces with text. <br className="hidden md:block" />
-          <span className="bg-gradient-to-r from-sky-400 to-indigo-400 bg-clip-text text-transparent">Adapt</span> builds and adapts them live.
+          <span className="bg-gradient-to-r from-sky-400 to-indigo-400 bg-clip-text text-transparent">Adapt</span> builds and adapts everything you need live.
         </h1>
         <p className="max-w-2xl text-white/70 mt-4">
-          Describe a component. We’ll generate it, validate it, auto-fix issues, and render securely in a sandbox.
+          Describe a component. We’ll generate it, validate it, auto-fix issues, and render.
         </p>
 
         <div className="mt-6 flex flex-wrap gap-3">
           <Link href="/sandbox" className="btn-primary">Open Sandbox</Link>
-          <Link href="/signup" className="btn-ghost">Create account</Link>
         </div>
 
         <div className="hr mt-8" />

@@ -8,21 +8,6 @@ type Issue = { type: string; message: string };
 
 const MAX_AUTOFIX_ATTEMPTS = 3;
 
-const fallbackDemo = `
-  const { useState } = React;
-  function Demo(props) {
-    const [count, setCount] = useState(0);
-    return (
-      <div style={{ padding: 16 }}>
-        <h2 style={{ margin: 0 }}>Hello from the sandbox!</h2>
-        <p style={{ marginTop: 8 }}>Prop title: {props?.title}</p>
-        <button onClick={() => setCount(c => c + 1)}>Count: {count}</button>
-      </div>
-    );
-  }
-  module.exports.default = Demo;
-`;
-
 const safeJson = async (res: Response) => {
   try { return await res.json(); } catch { return null; }
 };
@@ -31,7 +16,7 @@ export default function SandboxPage() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [status, setStatus] = useState<'idle'|'ok'|'error'|'validating'|'generating'|'autofixing'>('idle');
   const [error, setError] = useState<string | null>(null);
-  const [prompt, setPrompt] = useState('Create a pomodoro timer with start/pause/reset and a big time display.');
+  const [prompt, setPrompt] = useState('Create a tic tac toe game.');
   const [currentCode, setCurrentCode] = useState<string | null>(null);
 
   const postToSandbox = useCallback((code: string) => {
@@ -61,7 +46,7 @@ export default function SandboxPage() {
     let issues = startingIssues;
     let runtimeMsg = runtimeError;
 
-    while (attempt < MAX_AUTOFIX_ATTEMPTS) {
+    while (attempt < MAX_AUTOFIX_ATTEMPTS + 2) { // Increased attempts for better debugging
       attempt += 1;
       let patched = working;
       try {
@@ -84,7 +69,7 @@ export default function SandboxPage() {
           fix_summary: `autofix attempt ${attempt} debugger error`,
           success: false
         });
-        return;
+        continue; // Allow more debugging attempts
       }
 
       let val: { valid?: boolean; issues?: Issue[] } | null = null;
@@ -107,7 +92,7 @@ export default function SandboxPage() {
           fix_summary: `autofix attempt ${attempt} validator error`,
           success: false
         });
-        return;
+        continue; // Allow more validation attempts
       }
 
       const valIssues: Issue[] = Array.isArray(val?.issues) ? (val?.issues as Issue[]) : [];
@@ -134,7 +119,7 @@ export default function SandboxPage() {
     }
 
     setStatus('error');
-    setError('Auto-fix failed after 3 attempts.');
+    setError('Auto-fix failed after extended attempts.');
     await logFix({
       error_message: 'autofix exhausted',
       fix_summary: 'autofix attempts exhausted',
@@ -200,19 +185,14 @@ export default function SandboxPage() {
     }
   };
 
-  const renderDemo = () => {
-    setCurrentCode(fallbackDemo);
-    postToSandbox(fallbackDemo);
-  };
-
   return (
     <main className="py-6">
       <Navbar />
 
       <section className="glass p-6 mt-4 space-y-4">
-        <h1 className="text-2xl font-bold">Sandbox Renderer</h1>
+        <h1 className="text-2xl font-bold">Sandbox</h1>
         <p className="text-sm text-white/70">
-          Type a prompt to generate a component. If it fails, Adapt auto-fixes it silently.
+          We code, validate, and auto-repair. Type a prompt to generate a component.
         </p>
 
         <textarea
@@ -221,8 +201,7 @@ export default function SandboxPage() {
           onChange={(e)=>setPrompt(e.target.value)}
         />
         <div className="flex items-center gap-3">
-          <button onClick={handleGenerate} className="btn-primary">Generate & Render</button>
-          <button onClick={renderDemo} className="btn-ghost">Render Demo Component</button>
+          <button onClick={handleGenerate} className="btn-primary">Generate UI</button>
           <span className="text-sm">Status: {status}{error ? ` — ${error}` : ''}</span>
         </div>
       </section>
