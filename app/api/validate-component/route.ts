@@ -1,9 +1,10 @@
 import { openaiChat } from '@/lib/groq';
-import { validateComponentLocally, type ValidationIssue } from '@/lib/component-validator';
+import { assessComponentQualityForPrompt, validateComponentLocally, type ValidationIssue } from '@/lib/component-validator';
 
 export const runtime = 'nodejs';
+export const maxDuration = 30;
 
-type ReqBody = { code: string };
+type ReqBody = { code: string; prompt?: string };
 
 const ENABLE_AI_VALIDATION = process.env.OPENAI_ENABLE_AI_VALIDATION === 'true';
 const DEFAULT_VALIDATION_MAX_TOKENS = 450;
@@ -27,17 +28,23 @@ function dedupeIssues(issues: ValidationIssue[]): ValidationIssue[] {
 }
 
 export async function POST(req: Request) {
-  const { code } = (await req.json()) as ReqBody;
+  const { code, prompt = '' } = (await req.json()) as ReqBody;
   if (!code || typeof code !== 'string') {
     return new Response(JSON.stringify({ error: 'Missing code' }), { status: 400 });
   }
 
-  const local = validateComponentLocally(code);
+  const localStructural = validateComponentLocally(code);
+  const localQuality = assessComponentQualityForPrompt(code, String(prompt || ''));
+  const local = {
+    valid: localStructural.valid && localQuality.issues.length === 0,
+    issues: dedupeIssues([...localStructural.issues, ...localQuality.issues]),
+    qualityScore: localQuality.score
+  };
 
   // Default mode: local-only to avoid spending model tokens on every request.
   // Enable model validation with OPENAI_ENABLE_AI_VALIDATION=true when needed.
   if (!ENABLE_AI_VALIDATION) {
-    return Response.json({ valid: local.valid, issues: local.issues, mode: 'local' });
+    return Response.json({ valid: local.valid, issues: local.issues, qualityScore: local.qualityScore, mode: 'local' });
   }
 
   const sys =
@@ -57,15 +64,19 @@ Return JSON only:
       { role: 'system', content: sys },
       {
         role: 'user',
-        content: code.slice(
-          0,
-          Math.floor(clampNumber(
-            Number(process.env.OPENAI_VALIDATION_MAX_CODE_CHARS || DEFAULT_VALIDATION_CODE_CHARS),
-            1200,
-            9000,
-            DEFAULT_VALIDATION_CODE_CHARS
-          ))
-        )
+        content: [
+          prompt ? `Prompt:\n${String(prompt).slice(0, 500)}` : '',
+          'Code:',
+          code.slice(
+            0,
+            Math.floor(clampNumber(
+              Number(process.env.OPENAI_VALIDATION_MAX_CODE_CHARS || DEFAULT_VALIDATION_CODE_CHARS),
+              1200,
+              9000,
+              DEFAULT_VALIDATION_CODE_CHARS
+            ))
+          )
+        ].filter(Boolean).join('\n\n')
       }
     ],
     0.05,
@@ -100,5 +111,5 @@ Return JSON only:
 
   const valid = issues.length === 0 && (parsed?.valid ?? true);
 
-  return Response.json({ valid, issues, mode: 'ai+local' });
+  return Response.json({ valid, issues, qualityScore: local.qualityScore, mode: 'ai+local' });
 }

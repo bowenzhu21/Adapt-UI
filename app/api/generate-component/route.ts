@@ -1,8 +1,9 @@
 import { openaiChat } from '@/lib/groq';
-import { extractCode, getBuiltinComponentForPrompt, isComplexPrompt, normalizeGeneratedCode } from '@/lib/component-sandbox';
-import { validateComponentLocally } from '@/lib/component-validator';
+import { extractCode, isComplexPrompt, normalizeGeneratedCode, profilePrompt } from '@/lib/component-sandbox';
+import { assessComponentQualityForPrompt, type ValidationIssue, validateComponentLocally } from '@/lib/component-validator';
 
 export const runtime = 'nodejs';
+export const maxDuration = 60;
 
 type ReqBody = {
   prompt: string;
@@ -10,17 +11,106 @@ type ReqBody = {
   context?: Array<{ content: string }>;
 };
 
+type CandidateEvaluation = {
+  code: string;
+  issues: ValidationIssue[];
+  qualityScore: number;
+  valid: boolean;
+};
+
+type PipelineStep = {
+  phase: 'generate' | 'repair';
+  pass: number;
+  model: string;
+  issues: number;
+  quality: number;
+};
+
 const DEFAULT_SIMPLE_MAX_TOKENS = 1400;
-const DEFAULT_COMPLEX_MAX_TOKENS = 2400;
-const DEFAULT_GAME_MAX_TOKENS = 3000;
+const DEFAULT_COMPLEX_MAX_TOKENS = 2800;
+const DEFAULT_GAME_MAX_TOKENS = 3800;
 const DEFAULT_MAX_PROMPT_CHARS = 900;
 const DEFAULT_MAX_CONTEXT_ITEMS = 4;
 const DEFAULT_MAX_CONTEXT_ITEM_CHARS = 240;
-const MAX_GENERATION_TOKENS_CAP = 3200;
+const DEFAULT_SERVER_REPAIR_PASSES = 1;
+const DEFAULT_SERVER_REPAIR_PASSES_GAME = 2;
+const DEFAULT_MIN_QUALITY_SCORE = 0.62;
+const DEFAULT_MIN_GAME_QUALITY_SCORE = 0.74;
+const DEFAULT_PLAN_MAX_TOKENS = 380;
+const MAX_GENERATION_TOKENS_CAP = 4200;
 
 function clampNumber(value: number, min: number, max: number, fallback: number) {
   if (!Number.isFinite(value)) return fallback;
   return Math.min(max, Math.max(min, value));
+}
+
+function dedupeIssues(issues: ValidationIssue[]): ValidationIssue[] {
+  const seen = new Set<string>();
+  const out: ValidationIssue[] = [];
+  for (const issue of issues) {
+    const key = `${issue.type}:${issue.message}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(issue);
+  }
+  return out;
+}
+
+function summarizeIssues(issues: ValidationIssue[], limit = 12): string {
+  if (!issues.length) return '- No issues provided';
+  return issues.slice(0, limit).map((issue) => `- [${issue.type}] ${issue.message}`).join('\n');
+}
+
+function evaluateCandidate(code: string, promptText: string, minQualityScore: number): CandidateEvaluation {
+  const structural = validateComponentLocally(code);
+  const quality = assessComponentQualityForPrompt(code, promptText);
+  const issues = dedupeIssues([...structural.issues, ...quality.issues]);
+  const valid = structural.valid && quality.score >= minQualityScore;
+  return {
+    code,
+    issues,
+    qualityScore: quality.score,
+    valid,
+  };
+}
+
+function isBetterCandidate(next: CandidateEvaluation, best: CandidateEvaluation | null): boolean {
+  if (!best) return true;
+  if (next.valid && !best.valid) return true;
+  if (!next.valid && best.valid) return false;
+  if (next.issues.length !== best.issues.length) return next.issues.length < best.issues.length;
+  if (next.qualityScore !== best.qualityScore) return next.qualityScore > best.qualityScore;
+  return next.code.length < best.code.length;
+}
+
+async function buildImplementationPlan(promptText: string, contextText: string): Promise<string> {
+  const plannerModel = process.env.OPENAI_PLAN_MODEL || 'gpt-4o-mini';
+  const plannerTokens = Math.floor(clampNumber(
+    Number(process.env.OPENAI_PLAN_MAX_TOKENS || DEFAULT_PLAN_MAX_TOKENS),
+    120,
+    900,
+    DEFAULT_PLAN_MAX_TOKENS
+  ));
+
+  const planSystem =
+`You are a senior frontend engineer.\nReturn a compact implementation plan for one self-contained React sandbox component.\nOutput plain text only with sections:\n1) Core state model\n2) Rendering structure\n3) Input/interaction handling\n4) Edge cases/tests\nKeep it under 12 bullet points total.`;
+
+  const planUser = [
+    `Prompt: ${promptText}`,
+    contextText ? `Context:\n${contextText}` : ''
+  ].filter(Boolean).join('\n\n');
+
+  const plan = await openaiChat(
+    plannerModel,
+    [
+      { role: 'system', content: planSystem },
+      { role: 'user', content: planUser }
+    ],
+    0.1,
+    plannerTokens
+  );
+
+  return plan.trim().slice(0, 1800);
 }
 
 export async function POST(req: Request) {
@@ -62,6 +152,7 @@ export async function POST(req: Request) {
     .map((item) => String(item?.content || '').trim())
     .filter(Boolean)
     .map((content) => ({ content: content.slice(0, maxContextItemChars) }));
+  const contextText = safeContext.map((c) => `- ${c.content}`).join('\n');
 
   const safeMood = mood && typeof mood.label === 'string'
     ? {
@@ -70,37 +161,26 @@ export async function POST(req: Request) {
     }
     : undefined;
 
-  const promptLower = promptText.toLowerCase();
-  const isGamePrompt = /\b(game|snake|tetris|pong|breakout|flappy|maze|runner|platformer|arcade|shooter|racing)\b/.test(promptLower);
-  const isSnakePrompt = /\bsnake\b/.test(promptLower);
-  const isTicTacToePrompt = /tic[\s-]?tac[\s-]?toe/.test(promptLower);
-
-  const builtinCode = getBuiltinComponentForPrompt(promptText);
-  if (builtinCode) {
-    const normalizedBuiltin = normalizeGeneratedCode(builtinCode);
-    const localValidation = validateComponentLocally(normalizedBuiltin);
-    return Response.json({
-      code: normalizedBuiltin,
-      description: 'Generated component',
-      intent: 'builtin-snake',
-      localIssues: localValidation.issues,
-      note: 'Used built-in snake template for reliability and lower token cost.'
-    });
-  }
-
+  const promptProfile = profilePrompt(promptText);
   const complexPrompt = isComplexPrompt(promptText);
-  const generationModel = complexPrompt
-    ? (process.env.OPENAI_GENERATION_MODEL_COMPLEX || process.env.OPENAI_GENERATION_MODEL || 'gpt-4o-mini')
-    : (process.env.OPENAI_GENERATION_MODEL || 'gpt-4o-mini');
-  const complexMaxTokenBudget = isGamePrompt
+
+  const simpleModel = process.env.OPENAI_GENERATION_MODEL || 'gpt-4o-mini';
+  const complexModel = process.env.OPENAI_GENERATION_MODEL_COMPLEX || simpleModel;
+  const gameModel = process.env.OPENAI_GENERATION_MODEL_GAME || process.env.OPENAI_GENERATION_MODEL_COMPLEX || process.env.OPENAI_GENERATION_MODEL || 'gpt-4o';
+  const repairModel = promptProfile.isGame
+    ? (process.env.OPENAI_REPAIR_MODEL_GAME || process.env.OPENAI_DEBUG_MODEL_GAME || gameModel)
+    : (process.env.OPENAI_REPAIR_MODEL || process.env.OPENAI_DEBUG_MODEL || 'gpt-4o-mini');
+  const generationModel = promptProfile.isGame ? gameModel : (complexPrompt ? complexModel : simpleModel);
+
+  const complexMaxTokenBudget = promptProfile.isGame
     ? Number(process.env.OPENAI_GENERATION_MAX_TOKENS_GAME || DEFAULT_GAME_MAX_TOKENS)
     : Number(process.env.OPENAI_GENERATION_MAX_TOKENS_COMPLEX || DEFAULT_COMPLEX_MAX_TOKENS);
   const generationMaxTokens = Math.floor(complexPrompt
     ? clampNumber(
       complexMaxTokenBudget,
-      isGamePrompt ? 1200 : 800,
+      promptProfile.isGame ? 1500 : 900,
       MAX_GENERATION_TOKENS_CAP,
-      isGamePrompt ? DEFAULT_GAME_MAX_TOKENS : DEFAULT_COMPLEX_MAX_TOKENS
+      promptProfile.isGame ? DEFAULT_GAME_MAX_TOKENS : DEFAULT_COMPLEX_MAX_TOKENS
     )
     : clampNumber(
       Number(process.env.OPENAI_GENERATION_MAX_TOKENS || DEFAULT_SIMPLE_MAX_TOKENS),
@@ -109,7 +189,38 @@ export async function POST(req: Request) {
       DEFAULT_SIMPLE_MAX_TOKENS
     ));
 
-  const sys =
+  const maxServerRepairPasses = Math.floor(clampNumber(
+    Number(
+      promptProfile.isGame
+        ? (process.env.OPENAI_SERVER_REPAIR_PASSES_GAME || DEFAULT_SERVER_REPAIR_PASSES_GAME)
+        : (process.env.OPENAI_SERVER_REPAIR_PASSES || DEFAULT_SERVER_REPAIR_PASSES)
+    ),
+    0,
+    3,
+    promptProfile.isGame ? DEFAULT_SERVER_REPAIR_PASSES_GAME : DEFAULT_SERVER_REPAIR_PASSES
+  ));
+
+  const minQualityScore = clampNumber(
+    Number(
+      promptProfile.isGame
+        ? (process.env.OPENAI_MIN_GAME_QUALITY_SCORE || DEFAULT_MIN_GAME_QUALITY_SCORE)
+        : (process.env.OPENAI_MIN_QUALITY_SCORE || DEFAULT_MIN_QUALITY_SCORE)
+    ),
+    0.4,
+    0.95,
+    promptProfile.isGame ? DEFAULT_MIN_GAME_QUALITY_SCORE : DEFAULT_MIN_QUALITY_SCORE
+  );
+
+  const plannerEnabledRaw = process.env.OPENAI_GENERATION_ENABLE_PLANNER;
+  const plannerEnabled = plannerEnabledRaw === undefined
+    ? promptProfile.isGame
+    : plannerEnabledRaw === 'true';
+
+  const implementationPlan = plannerEnabled
+    ? await buildImplementationPlan(promptText, contextText)
+    : '';
+
+  const generationSystem =
 `You generate one self-contained React 18 + TypeScript component module for sandbox execution.
 
 Execution:
@@ -129,66 +240,142 @@ Rules:
 - End with: module.exports.default = <ComponentName>;
 - No network or storage APIs.
 - Use helper classes directly via className strings (e.g. className="adapt-panel"), never styles['...'] or styles.foo.
-- Default layout should use adapt-shell + adapt-panel for a clean centered surface.
-- Cohesion requirement: generated UI must look like the host Adapt UI glass style, using adapt-* classes for containers/controls instead of custom inline theme blocks.
+- Default layout should use adapt-shell + adapt-panel.
+- Keep visuals cohesive with host Adapt UI glass style.
 - Use deterministic logic and safe fallbacks for missing props.
-- Visual quality bar: clean, modern, and polished; avoid browser-default looking controls.
-- Prefer a dark modern palette with rich contrast (deep navy/charcoal + vivid cyan/blue/purple accents), not flat gray UI.
-- Never produce pale/low-contrast UI where primary gameplay elements are hard to see.
-- Assume the sandbox may sit on a bright photographic backdrop; keep UI readable with strong contrast (no light text on light panels).
-- Style all interactive UI states (hover/focus/active/disabled) with clear contrast.
-- Keep code compact (80-260 lines) for simple prompts; for game prompts you may use up to ~650 lines when needed.
-- For interactive games, prioritize complete gameplay loop and visual clarity over generic dashboard UI.
-- Avoid hardcoded gray/white flat container palettes; rely on adapt-panel, adapt-btn, adapt-btn-ghost, adapt-input, adapt-pill for visual consistency.
-- Game outputs should include: visible score/status HUD, restart flow, keyboard controls, and cleanup for timers/listeners.
-- For keyboard-driven games, support Arrow keys and WASD where applicable.
-- When handling movement keys, call preventDefault() for Arrow/Space keys to avoid page scrolling.
-- For interactive games (snake/tic-tac-toe), use clear board/canvas layout, visible score/status, and keyboard controls with cleanup.
-- Do not output placeholder game UIs with non-functional decorative cells.
-- For board games, prefer adapt-board for the board container and adapt-cell for each square.
-- For tic-tac-toe specifically, render EXACTLY 9 cells inside one adapt-board grid.
-- For snake specifically, render gameplay on a <canvas> board (avoid hundreds of per-cell DOM nodes), start in a playable state (not immediate game-over), and expose clear restart controls.
-- Prefer refs and component event handlers over direct global DOM mutation.
+- Style interactive states (hover/focus/active/disabled) with clear contrast.
+- For game prompts, produce a fully playable implementation with complete rules, controls, score/HUD, restart flow, and cleanup for listeners/timers.
+- Avoid placeholder UIs or fake boards with non-functional cells.
 - Include basic accessibility labels/focus states.`;
 
-  const gameQualityRequirement = isGamePrompt
-    ? 'Hard requirement: Build a complete polished game with clear HUD (score + state), full controls, visible high-contrast gameplay elements, and keyboard support (Arrow + WASD where relevant).'
-    : '';
-  const snakeQualityRequirement = isSnakePrompt
-    ? 'Hard requirement for snake: use a canvas board, prevent 180-degree turns, spawn food only in empty cells, handle wall/self collision, include restart after game over, and do not initialize in game-over state.'
+  const gameRequirements = promptProfile.isGame
+    ? [
+      'Hard requirement: full game loop/turn loop with complete win/lose/draw logic as appropriate.',
+      'Hard requirement: reliable controls (keyboard for keyboard-driven games).',
+      'Hard requirement: clear HUD (status + score/progress) and restart/reset flow.'
+    ].join('\n')
     : '';
 
-  const usrParts = [
-    `User request: ${promptText}`,
-    safeMood ? `Mood: ${safeMood.label} (${safeMood.score}/10)` : '',
-    safeContext.length ? `Context:\n${safeContext.map(c=>`- ${c.content}`).join('\n')}` : '',
-    gameQualityRequirement,
-    snakeQualityRequirement,
-    isTicTacToePrompt ? 'Hard requirement: Use className="adapt-board" for the board and className="adapt-cell" for each of the 9 squares.' : ''
+  const promptSpecificRequirements = [
+    /tic[\s-]?tac[\s-]?toe/i.test(promptText)
+      ? 'For tic-tac-toe: model exactly 9 cells, proper winner lines, draw handling, and score tracking.'
+      : '',
+    /\b2048\b/i.test(promptText)
+      ? 'For 2048: implement real 4x4 board state, one-merge-per-move behavior, random spawn of 2/4 on valid moves, score accumulation, and game-over detection when no moves remain.'
+      : '',
+    /\bsnake\b/i.test(promptText)
+      ? 'For snake: include playable movement, food spawning, collision handling, and restart from game-over.'
+      : ''
   ].filter(Boolean).join('\n');
 
-  const content = await openaiChat(
+  const baseUserPrompt = [
+    `User request: ${promptText}`,
+    safeMood ? `Mood: ${safeMood.label} (${safeMood.score}/10)` : '',
+    contextText ? `Context:\n${contextText}` : '',
+    implementationPlan ? `Implementation plan:\n${implementationPlan}` : '',
+    gameRequirements,
+    promptSpecificRequirements
+  ].filter(Boolean).join('\n\n');
+
+  const pipeline: PipelineStep[] = [];
+  let best: CandidateEvaluation | null = null;
+  let workingCode = '';
+
+  const firstContent = await openaiChat(
     generationModel,
     [
-      { role: 'system', content: sys },
-      { role: 'user', content: usrParts }
+      { role: 'system', content: generationSystem },
+      { role: 'user', content: baseUserPrompt }
     ],
-    0.15,
+    0.14,
     generationMaxTokens
   );
 
-  const code = normalizeGeneratedCode(extractCode(content));
-  const localValidation = validateComponentLocally(code);
+  workingCode = normalizeGeneratedCode(extractCode(firstContent));
 
-  const note = localValidation.valid
-    ? undefined
-    : `Local validation issues: ${localValidation.issues.map((i) => i.message).join(' | ')}`;
+  for (let pass = 0; pass <= maxServerRepairPasses; pass += 1) {
+    const evaluation = evaluateCandidate(workingCode, promptText, minQualityScore);
+    pipeline.push({
+      phase: pass === 0 ? 'generate' : 'repair',
+      pass,
+      model: pass === 0 ? generationModel : repairModel,
+      issues: evaluation.issues.length,
+      quality: evaluation.qualityScore,
+    });
+
+    if (isBetterCandidate(evaluation, best)) {
+      best = evaluation;
+    }
+
+    if (evaluation.valid) {
+      return Response.json({
+        code: evaluation.code,
+        description: 'Generated component',
+        intent: promptProfile.isGame ? 'game-generated' : 'component-generated',
+        localIssues: evaluation.issues,
+        qualityScore: evaluation.qualityScore,
+        pipeline,
+      });
+    }
+
+    if (pass >= maxServerRepairPasses) break;
+
+    const repairSystem =
+`Repair this React sandbox module.
+Rules:
+- No imports/require.
+- Must end with module.exports.default = <ComponentName>.
+- Preserve intent from prompt and improve code quality.
+- Keep it fully functional, not a placeholder.
+- Return only module code.`;
+
+    const repairUser = [
+      `Original prompt: ${promptText}`,
+      implementationPlan ? `Implementation plan:\n${implementationPlan}` : '',
+      `Current code:\n\n${workingCode}`,
+      `Detected issues:\n${summarizeIssues(evaluation.issues)}`,
+      `Quality score target: >= ${minQualityScore.toFixed(2)} (current: ${evaluation.qualityScore.toFixed(2)})`,
+      'Return a corrected full module implementation.'
+    ].filter(Boolean).join('\n\n');
+
+    const repairedContent = await openaiChat(
+      repairModel,
+      [
+        { role: 'system', content: repairSystem },
+        { role: 'user', content: repairUser }
+      ],
+      0.12,
+      generationMaxTokens
+    );
+
+    const repairedCode = normalizeGeneratedCode(extractCode(repairedContent));
+
+    if (!repairedCode.trim() || repairedCode.trim() === workingCode.trim()) {
+      const retryUser = `${baseUserPrompt}\n\nPrevious attempt failed checks:\n${summarizeIssues(evaluation.issues)}\n\nGenerate a substantially improved implementation.`;
+      const retryContent = await openaiChat(
+        generationModel,
+        [
+          { role: 'system', content: generationSystem },
+          { role: 'user', content: retryUser }
+        ],
+        0.2,
+        generationMaxTokens
+      );
+      workingCode = normalizeGeneratedCode(extractCode(retryContent));
+    } else {
+      workingCode = repairedCode;
+    }
+  }
+
+  const fallback = best ?? evaluateCandidate(workingCode, promptText, minQualityScore);
 
   return Response.json({
-    code,
+    code: fallback.code,
     description: 'Generated component',
-    intent: 'unspecified',
-    localIssues: localValidation.issues,
-    note
+    intent: promptProfile.isGame ? 'game-generated-fallback' : 'component-generated-fallback',
+    localIssues: fallback.issues,
+    qualityScore: fallback.qualityScore,
+    pipeline,
+    note: `Returned best candidate after pipeline attempts. Remaining issues: ${fallback.issues.length}.`,
   });
 }

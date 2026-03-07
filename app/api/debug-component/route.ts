@@ -1,14 +1,16 @@
 import { openaiChat } from '@/lib/groq';
 import { extractCode, normalizeGeneratedCode } from '@/lib/component-sandbox';
-import { validateComponentLocally } from '@/lib/component-validator';
+import { assessComponentQualityForPrompt, validateComponentLocally } from '@/lib/component-validator';
 
 export const runtime = 'nodejs';
+export const maxDuration = 60;
 
 type Issue = { type: string; message: string };
 type ReqBody = {
   code: string;
   issues?: Issue[];
   runtimeError?: string;
+  prompt?: string;
 };
 
 const DEFAULT_DEBUG_MAX_CODE_CHARS = 12_000;
@@ -66,18 +68,20 @@ function dedupeIssues(issues: Issue[]): Issue[] {
 }
 
 export async function POST(req: Request) {
-  const { code, issues = [], runtimeError } = (await req.json()) as ReqBody;
+  const { code, issues = [], runtimeError, prompt = '' } = (await req.json()) as ReqBody;
   if (!code) {
     return new Response(JSON.stringify({ error: 'Missing code' }), { status: 400 });
   }
   const safeRuntimeError = runtimeError ? String(runtimeError).slice(0, DEBUG_MAX_RUNTIME_ERROR_CHARS) : undefined;
 
   const local = validateComponentLocally(code);
+  const quality = assessComponentQualityForPrompt(code, String(prompt || ''));
   const mergedIssues = dedupeIssues([
     ...issues,
-    ...local.issues.map((i) => ({ type: i.type, message: i.message }))
+    ...local.issues.map((i) => ({ type: i.type, message: i.message })),
+    ...quality.issues.map((i) => ({ type: i.type, message: i.message }))
   ]);
-  const codeLower = String(code || '').toLowerCase();
+  const codeLower = `${String(code || '').toLowerCase()} ${String(prompt || '').toLowerCase()}`;
   const isSnakeFix = /\bsnake\b/.test(codeLower) || mergedIssues.some((i) => /snake/i.test(i.message));
   const isGameFix = isSnakeFix || /\b(game|tetris|pong|breakout|flappy|maze|runner|platformer)\b/.test(codeLower)
     || mergedIssues.some((i) => /\b(game|score|canvas|keyboard)\b/i.test(i.message));
@@ -89,6 +93,9 @@ export async function POST(req: Request) {
       DEFAULT_DEBUG_GAME_MAX_TOKENS
     ))
     : DEBUG_MAX_TOKENS;
+  const debugModel = isGameFix
+    ? (process.env.OPENAI_DEBUG_MODEL_GAME || process.env.OPENAI_DEBUG_MODEL || 'gpt-4o')
+    : (process.env.OPENAI_DEBUG_MODEL || 'gpt-4o-mini');
 
   // Avoid spending tokens when there is nothing to fix.
   if (!runtimeError && mergedIssues.length === 0) {
@@ -116,11 +123,12 @@ Rules:
 Output only fixed module code.`;
 
   const qualityHints = [
-    isGameFix ? 'Quality target: keep this as a polished, fully playable game with clear HUD (score/state) and proper restart flow.' : '',
+    isGameFix ? `Quality target: keep this as a polished, fully playable game with clear HUD (score/state) and proper restart flow. Current quality score: ${quality.score.toFixed(2)}.` : '',
     isSnakeFix ? 'Snake target: ensure canvas rendering, food spawn on empty cells, no 180-degree turns, collision handling, keyboard input reliability, and restart after game over.' : ''
   ].filter(Boolean).join('\n');
 
   const user = [
+    prompt ? `Original prompt:\n${String(prompt).slice(0, 600)}` : '',
     `Original code:\n\n${compactText(code, DEBUG_MAX_CODE_CHARS)}`,
     mergedIssues.length ? `Validation issues:\n${mergedIssues.slice(0, DEBUG_MAX_ISSUES).map(i => `- [${i.type}] ${i.message}`).join('\n')}` : '',
     safeRuntimeError ? `Runtime error: ${safeRuntimeError}` : '',
@@ -128,7 +136,7 @@ Output only fixed module code.`;
   ].filter(Boolean).join('\n\n');
 
   const content = await openaiChat(
-    process.env.OPENAI_DEBUG_MODEL || 'gpt-4o-mini',
+    debugModel,
     [
       { role: 'system', content: sys },
       { role: 'user', content: user }

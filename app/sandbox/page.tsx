@@ -2,11 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Navbar from '@/components/UI/Navbar';
-import HeroBackdrop3D from '@/components/UI/HeroBackdrop3D';
 
 type Issue = { type: string; message: string };
 
-const MAX_AUTOFIX_ATTEMPTS = 3;
+const MAX_AUTOFIX_ATTEMPTS = 4;
 const MAX_PROMPT_CHARS = 900;
 const SANDBOX_BASE_STYLES = `
   :root {
@@ -14,8 +13,8 @@ const SANDBOX_BASE_STYLES = `
     --adapt-surface: rgba(255, 255, 255, 0.16);
     --adapt-surface-soft: rgba(255, 255, 255, 0.1);
     --adapt-border: rgba(255, 255, 255, 0.36);
-    --adapt-text: #edf3ff;
-    --adapt-muted: rgba(220, 231, 251, 0.82);
+    --adapt-text: #0f172a;
+    --adapt-muted: rgba(30, 41, 59, 0.82);
     --adapt-primary: #9ecbff;
     --adapt-accent: #f08cbd;
     --adapt-success: #10b981;
@@ -88,7 +87,7 @@ const SANDBOX_BASE_STYLES = `
     line-height: 1.2;
     letter-spacing: -0.015em;
     color: var(--adapt-text);
-    text-shadow: 0 8px 24px rgba(3, 7, 16, 0.42);
+    text-shadow: 0 1px 0 rgba(255, 255, 255, 0.46);
   }
 
   .adapt-subtitle {
@@ -133,7 +132,7 @@ const SANDBOX_BASE_STYLES = `
     box-shadow:
       inset 0 1px 0 rgba(255, 255, 255, 0.34),
       0 10px 18px rgba(3, 6, 14, 0.36);
-    color: #f8fbff;
+    color: #0f1e3b;
   }
 
   .adapt-btn,
@@ -152,7 +151,7 @@ const SANDBOX_BASE_STYLES = `
     background:
       linear-gradient(128deg, rgba(255, 255, 255, 0.26), rgba(255, 255, 255, 0.08)),
       linear-gradient(140deg, rgba(125, 181, 255, 0.8), rgba(240, 140, 189, 0.68));
-    color: #f6fbff;
+    color: #0a1934;
     box-shadow:
       inset 0 1px 0 rgba(255, 255, 255, 0.52),
       0 12px 24px rgba(2, 6, 14, 0.38);
@@ -162,7 +161,7 @@ const SANDBOX_BASE_STYLES = `
   .adapt-btn-ghost {
     border: 1px solid rgba(255, 255, 255, 0.42);
     background: rgba(255, 255, 255, 0.16);
-    color: rgba(245, 249, 255, 0.96);
+    color: #102143;
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.48);
     backdrop-filter: blur(12px) saturate(160%);
     -webkit-backdrop-filter: blur(12px) saturate(160%);
@@ -244,13 +243,17 @@ const SANDBOX_BASE_STYLES = `
     color: var(--adapt-muted);
   }
 
+  :where(span, li, label, small, strong) {
+    color: var(--adapt-text);
+  }
+
   :where(button) {
     appearance: none;
     border: 1px solid rgba(255, 255, 255, 0.5);
     background:
       linear-gradient(128deg, rgba(255, 255, 255, 0.26), rgba(255, 255, 255, 0.08)),
       linear-gradient(140deg, rgba(125, 181, 255, 0.8), rgba(240, 140, 189, 0.68));
-    color: #f6fbff;
+    color: #0a1934;
     border-radius: 12px;
     padding: 9px 14px;
     font: inherit;
@@ -307,6 +310,7 @@ export default function SandboxPage() {
   const lastRuntimeFingerprintRef = useRef<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [prompt, setPrompt] = useState('');
+  const [activePrompt, setActivePrompt] = useState('');
   const [currentCode, setCurrentCode] = useState<string | null>(null);
   const [status, setStatus] = useState<string>('Idle');
 
@@ -322,8 +326,8 @@ export default function SandboxPage() {
             primary: '#9ecbff',
             accent: '#f08cbd',
             surface: 'rgba(255, 255, 255, 0.16)',
-            muted: 'rgba(220, 231, 251, 0.82)',
-            text: '#edf3ff'
+            muted: 'rgba(30, 41, 59, 0.82)',
+            text: '#0f172a'
           },
           data: {
             metrics: [
@@ -367,12 +371,18 @@ export default function SandboxPage() {
     []
   );
 
-  const autoFix = useCallback(async (code: string, startingIssues: Issue[] = [], runtimeError?: string): Promise<boolean> => {
+  const autoFix = useCallback(async (
+    code: string,
+    startingIssues: Issue[] = [],
+    runtimeError?: string,
+    promptContext?: string
+  ): Promise<boolean> => {
     setError(null);
     let attempt = 0;
     let working = code;
     let issues = startingIssues;
     let runtimeMsg = runtimeError;
+    const fixPrompt = String(promptContext || activePrompt || '').trim();
 
     while (attempt < MAX_AUTOFIX_ATTEMPTS) {
       attempt += 1;
@@ -381,7 +391,7 @@ export default function SandboxPage() {
         const dbgRes = await fetch('/api/debug-component', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code: working, issues, runtimeError: runtimeMsg })
+          body: JSON.stringify({ code: working, issues, runtimeError: runtimeMsg, prompt: fixPrompt })
         });
         if (!dbgRes.ok) {
           const txt = await dbgRes.text().catch(() => '');
@@ -414,7 +424,7 @@ export default function SandboxPage() {
         const valRes = await fetch('/api/validate-component', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code: patched })
+          body: JSON.stringify({ code: patched, prompt: fixPrompt })
         });
         if (!valRes.ok) {
           const txt = await valRes.text().catch(() => '');
@@ -461,7 +471,7 @@ export default function SandboxPage() {
       success: false
     });
     return false;
-  }, [logFix, postToSandbox]);
+  }, [activePrompt, logFix, postToSandbox]);
 
   useEffect(() => {
     const onMsg = async (e: MessageEvent) => {
@@ -480,7 +490,7 @@ export default function SandboxPage() {
           try {
             isAutoFixingRef.current = true;
             setStatus('autofixing');
-            const fixed = await autoFix(currentCode, [], msg);
+            const fixed = await autoFix(currentCode, [], msg, activePrompt);
             setStatus(fixed ? 'ok' : 'error');
           } finally {
             isAutoFixingRef.current = false;
@@ -493,7 +503,7 @@ export default function SandboxPage() {
     };
     window.addEventListener('message', onMsg);
     return () => window.removeEventListener('message', onMsg);
-  }, [autoFix, currentCode]);
+  }, [activePrompt, autoFix, currentCode]);
 
   useEffect(() => {
     const iframe = iframeRef.current;
@@ -563,6 +573,7 @@ export default function SandboxPage() {
 
     setStatus('generating');
     setError(null);
+    setActivePrompt(trimmedPrompt);
     lastRuntimeFingerprintRef.current = null;
     try {
       const genRes = await fetch('/api/generate-component', {
@@ -581,7 +592,7 @@ export default function SandboxPage() {
       const valRes = await fetch('/api/validate-component', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: gen.code })
+        body: JSON.stringify({ code: gen.code, prompt: trimmedPrompt })
       });
       if (!valRes.ok) {
         const txt = await valRes.text().catch(() => '');
@@ -597,7 +608,7 @@ export default function SandboxPage() {
         // Attempt auto-fix immediately when validation fails
         setStatus('autofixing');
         const issues = Array.isArray(val?.issues) ? val.issues : [];
-        const fixed = await autoFix(gen.code, issues);
+        const fixed = await autoFix(gen.code, issues, undefined, trimmedPrompt);
         setStatus(fixed ? 'ok' : 'error');
       }
     } catch (e) {
@@ -619,7 +630,6 @@ export default function SandboxPage() {
 
   return (
     <main className="immersive-page sandbox-page">
-      <HeroBackdrop3D className="hero-three hero-three-sandbox" />
       <div className="hero-sheen sandbox-sheen" aria-hidden="true" />
       <div className="hero-vignette" aria-hidden="true" />
 

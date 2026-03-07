@@ -151,27 +151,10 @@
     opacity: 0.72;
   }
 
-  .hero-three {
-    position: absolute;
-    inset: 0;
-    z-index: 1;
-    pointer-events: none;
-  }
-
-  .hero-three-home {
-    inset: -16% -8% -34% 50%;
-    filter: saturate(1.08) contrast(1.04);
-  }
-
-  .hero-three-sandbox {
-    inset: -9% -18% -34% 26%;
-    opacity: 0.94;
-  }
-
   .hero-sheen {
     position: absolute;
     inset: 0;
-    z-index: 2;
+    z-index: 1;
     pointer-events: none;
     background:
       radial-gradient(1000px 620px at 78% 20%, rgba(255, 255, 255, 0.19), transparent 60%),
@@ -193,7 +176,7 @@
   .hero-vignette {
     position: absolute;
     inset: 0;
-    z-index: 3;
+    z-index: 2;
     pointer-events: none;
     background: radial-gradient(130% 100% at 5% 100%, rgba(5, 8, 16, 0.42), transparent 58%);
   }
@@ -420,14 +403,6 @@
   }
 
   @media (max-width: 1040px) {
-    .hero-three-home {
-      inset: 2% -34% -48% 36%;
-    }
-
-    .hero-three-sandbox {
-      inset: 8% -48% -44% 24%;
-    }
-
     .home-copy {
       max-width: 560px;
     }
@@ -448,14 +423,6 @@
 
     .home-page .page-frame {
       min-height: calc(100svh - 20px);
-    }
-
-    .hero-three-home {
-      inset: 20% -60% -62% 16%;
-    }
-
-    .hero-three-sandbox {
-      inset: 22% -60% -58% 0%;
     }
 
     .home-stage {

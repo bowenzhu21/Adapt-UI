@@ -1,10 +1,8 @@
 import Navbar from '@/components/UI/Navbar';
-import HeroBackdrop3D from '@/components/UI/HeroBackdrop3D';
 
 export default function Home() {
   return (
     <main className="immersive-page home-page">
-      <HeroBackdrop3D className="hero-three hero-three-home" />
       <div className="hero-sheen home-sheen" aria-hidden="true" />
       <div className="hero-vignette" aria-hidden="true" />
 
