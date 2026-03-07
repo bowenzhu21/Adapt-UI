@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <title>Sandbox</title>
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'none'; script-src 'unsafe-eval' 'unsafe-inline' https://unpkg.com; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'">
-    <style>html,body,#root{height:100%;margin:0;font-family:system-ui,sans-serif}</style>
+          content="default-src 'none'; script-src 'unsafe-eval' 'unsafe-inline' https://unpkg.com; style-src 'unsafe-inline'; connect-src 'none'; img-src 'self' data: blob:; font-src data:; media-src data:">
+    <style>html,body,#root{height:100%;margin:0;font-family:system-ui,sans-serif;background:transparent!important;overflow:auto}</style>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script crossorigin src="https://unpkg.com/@babel/standalone@7.26.3/babel.min.js"></script>
@@ -14,11 +14,44 @@
     <div id="root"></div>
     <script>
       // Minimal ESM-to-CJS preprocessor
-      function transpile(code) {
-        code = code.replace(/^\s*import\s+[^;]+;?\s*$/gm, '');
-        code = code.replace(/export\s+default\s+function\s+([A-Za-z0-9_]+)\s*\(/g, 'module.exports.default = function $1(');
-        code = code.replace(/export\s+default\s+([A-Za-z0-9_]+)\s*;?/g, 'module.exports.default = $1;');
+      const hookPrelude = "const { useState, useEffect, useMemo, useRef, useReducer, useLayoutEffect, useCallback } = React;";
+
+      function stripImports(code) {
+        return code.replace(/^\s*import[^;]+;?\s*$/gm, '');
+      }
+
+      function normalizeExports(code) {
+        let out = code;
+        out = out.replace(/export\s+default\s+function\s+([A-Za-z0-9_]+)\s*\(/g, 'module.exports.default = function $1(');
+        out = out.replace(/export\s+default\s+class\s+([A-Za-z0-9_]+)\s*/g, 'module.exports.default = class $1 ');
+        out = out.replace(/export\s+default\s+/g, 'module.exports.default = ');
+        return out;
+      }
+
+      function ensureHooks(code) {
+        const hasHookDestructure = /\{\s*[^}]*(useState|useEffect|useMemo|useRef|useReducer|useLayoutEffect|useCallback)[^}]*\}\s*=\s*React/.test(code);
+        const hasDirectHookBinding = /(const|let|var)\s+(useState|useEffect|useMemo|useRef|useReducer|useLayoutEffect|useCallback)\s*=\s*React\.\2/.test(code);
+        if (hasHookDestructure || hasDirectHookBinding) return code;
+        return `${hookPrelude}\n${code}`;
+      }
+
+      function ensureDefaultExport(code) {
+        if (/module\.exports\.default\s*=/.test(code)) return code;
+        const match =
+          code.match(/function\s+([A-Z][A-Za-z0-9_]*)\s*\(/) ||
+          code.match(/class\s+([A-Z][A-Za-z0-9_]*)\s+/) ||
+          code.match(/const\s+([A-Z][A-Za-z0-9_]*)\s*=\s*(?:\(|function|class)/);
+        if (match && match[1]) return `${code}\nmodule.exports.default = ${match[1]};`;
         return code;
+      }
+
+      function transpile(code) {
+        let work = String(code || '');
+        work = stripImports(work);
+        work = normalizeExports(work);
+        work = ensureHooks(work);
+        work = ensureDefaultExport(work);
+        return work;
       }
 
       // Error boundary to catch render/update errors
@@ -43,23 +76,325 @@
         parent.postMessage({ type: 'render:error', message: msg }, '*');
       });
 
+      let root = null;
+      let boundaryKey = 0;
+      const scrollBlockKeys = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'Spacebar']);
+
+      function forwardKeyboardEvent(type, payload) {
+        if (!payload || !payload.key) return;
+        const evt = new KeyboardEvent(type, {
+          key: payload.key,
+          code: payload.code || '',
+          altKey: Boolean(payload.altKey),
+          ctrlKey: Boolean(payload.ctrlKey),
+          metaKey: Boolean(payload.metaKey),
+          shiftKey: Boolean(payload.shiftKey),
+          repeat: Boolean(payload.repeat),
+          bubbles: true,
+          cancelable: true
+        });
+        window.dispatchEvent(evt);
+        document.dispatchEvent(evt);
+      }
+
       const render = ({ code, props }) => {
         try {
           const exports = {};
           const module = { exports };
           const transpiled = transpile(String(code || ''));
           const compiled = window.Babel
-            ? window.Babel.transform(transpiled, { presets: ['react'] }).code
+            ? window.Babel.transform(transpiled, {
+                filename: 'component.tsx',
+                presets: [
+                  ['typescript', { isTSX: true, allExtensions: true }],
+                  'react'
+                ]
+              }).code
             : transpiled;
           // eslint-disable-next-line no-new-func
+          const defaultProps = {
+            title: 'Sandbox Demo',
+            styles: `
+              :root {
+                --adapt-bg: #050a14;
+                --adapt-surface: rgba(255, 255, 255, 0.16);
+                --adapt-surface-soft: rgba(255, 255, 255, 0.1);
+                --adapt-border: rgba(255, 255, 255, 0.36);
+                --adapt-text: #edf3ff;
+                --adapt-muted: rgba(220, 231, 251, 0.82);
+                --adapt-primary: #9ecbff;
+                --adapt-accent: #f08cbd;
+                --adapt-success: #10b981;
+                --adapt-danger: #ff5f74;
+                --adapt-radius: 18px;
+                --adapt-shadow: 0 24px 48px rgba(3, 6, 14, 0.44);
+              }
+
+              * { box-sizing: border-box; }
+
+              html, body, #root { margin: 0; width: 100%; min-height: 100%; }
+              html, body, #root { background: transparent !important; }
+
+              body {
+                font-family: 'IBM Plex Sans', system-ui, sans-serif;
+                color: var(--adapt-text);
+                background: transparent;
+                line-height: 1.5;
+              }
+
+              #root {
+                padding: 18px;
+                display: flex;
+                align-items: flex-start;
+                justify-content: center;
+                background: transparent !important;
+              }
+
+              .adapt-shell {
+                width: 100%;
+                max-width: none;
+                margin: 0 auto;
+              }
+
+              .adapt-panel {
+                position: relative;
+                overflow: hidden;
+                background:
+                  linear-gradient(150deg, rgba(255, 255, 255, 0.26) 0%, rgba(255, 255, 255, 0.1) 58%, rgba(255, 255, 255, 0.16) 100%);
+                border: 1px solid var(--adapt-border);
+                border-radius: var(--adapt-radius);
+                box-shadow:
+                  inset 0 1px 0 rgba(255, 255, 255, 0.56),
+                  inset 0 -1px 0 rgba(255, 255, 255, 0.12),
+                  var(--adapt-shadow);
+                backdrop-filter: blur(24px) saturate(180%);
+                -webkit-backdrop-filter: blur(24px) saturate(180%);
+                padding: 18px;
+              }
+
+              .adapt-panel::before {
+                content: '';
+                position: absolute;
+                inset: 1px;
+                border-radius: inherit;
+                pointer-events: none;
+                background:
+                  linear-gradient(120deg, rgba(255, 255, 255, 0.44), rgba(255, 255, 255, 0) 34%),
+                  radial-gradient(130% 90% at 0% 100%, rgba(116, 179, 255, 0.18), transparent 52%);
+                opacity: 0.82;
+              }
+
+              .adapt-title {
+                margin: 0;
+                font-size: clamp(1.25rem, 2.2vw, 1.8rem);
+                line-height: 1.2;
+                letter-spacing: -0.015em;
+                color: var(--adapt-text);
+                text-shadow: 0 8px 24px rgba(3, 7, 16, 0.42);
+              }
+
+              .adapt-subtitle {
+                margin: 8px 0 0;
+                color: var(--adapt-muted);
+                font-size: 0.95rem;
+              }
+
+              .adapt-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+              .adapt-grid { display: grid; gap: 12px; }
+
+              .adapt-board {
+                display: grid;
+                grid-template-columns: repeat(3, minmax(72px, 1fr));
+                gap: 10px;
+                width: min(340px, 100%);
+                padding: 8px;
+                border-radius: 14px;
+                border: 1px solid rgba(255, 255, 255, 0.24);
+                background: rgba(12, 18, 34, 0.44);
+              }
+
+              .adapt-cell {
+                aspect-ratio: 1 / 1;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 1.2rem;
+                font-weight: 700;
+                border-radius: 14px;
+                border: 1px solid rgba(171, 209, 255, 0.42);
+                background: linear-gradient(156deg, rgba(125, 181, 255, 0.38), rgba(240, 140, 189, 0.24) 54%, rgba(14, 22, 44, 0.62));
+                box-shadow:
+                  inset 0 1px 0 rgba(255, 255, 255, 0.34),
+                  0 10px 18px rgba(3, 6, 14, 0.36);
+                color: #f8fbff;
+              }
+
+              .adapt-btn,
+              .adapt-btn-ghost {
+                appearance: none;
+                border-radius: 12px;
+                padding: 9px 14px;
+                font: inherit;
+                font-weight: 600;
+                cursor: pointer;
+                transition: transform 0.14s ease, filter 0.14s ease, box-shadow 0.14s ease;
+              }
+
+              .adapt-btn {
+                border: 1px solid rgba(255, 255, 255, 0.5);
+                background:
+                  linear-gradient(128deg, rgba(255, 255, 255, 0.26), rgba(255, 255, 255, 0.08)),
+                  linear-gradient(140deg, rgba(125, 181, 255, 0.8), rgba(240, 140, 189, 0.68));
+                color: #f6fbff;
+                box-shadow:
+                  inset 0 1px 0 rgba(255, 255, 255, 0.52),
+                  0 12px 24px rgba(2, 6, 14, 0.38);
+                font-weight: 700;
+              }
+
+              .adapt-btn-ghost {
+                border: 1px solid rgba(255, 255, 255, 0.42);
+                background: rgba(255, 255, 255, 0.16);
+                color: rgba(245, 249, 255, 0.96);
+                box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.48);
+                backdrop-filter: blur(12px) saturate(160%);
+                -webkit-backdrop-filter: blur(12px) saturate(160%);
+              }
+
+              .adapt-btn:hover,
+              .adapt-btn-ghost:hover {
+                transform: translateY(-1px);
+                filter: saturate(1.06) brightness(1.04);
+              }
+
+              .adapt-btn:active,
+              .adapt-btn-ghost:active {
+                transform: translateY(0);
+              }
+
+              .adapt-btn:focus-visible,
+              .adapt-btn-ghost:focus-visible {
+                outline: none;
+                box-shadow: 0 0 0 3px rgba(164, 209, 255, 0.22);
+              }
+
+              .adapt-input {
+                width: 100%;
+                border: 1px solid rgba(182, 211, 255, 0.46);
+                background: rgba(10, 16, 30, 0.56);
+                color: var(--adapt-text);
+                border-radius: 12px;
+                padding: 10px 12px;
+                font: inherit;
+              }
+
+              .adapt-input::placeholder {
+                color: rgba(205, 218, 240, 0.74);
+              }
+
+              .adapt-input:focus-visible {
+                outline: none;
+                border-color: rgba(210, 230, 255, 0.84);
+                background: rgba(11, 18, 33, 0.74);
+                box-shadow: 0 0 0 3px rgba(120, 182, 255, 0.24);
+              }
+
+              :where(h1, h2, h3) {
+                margin: 0 0 10px;
+                line-height: 1.2;
+                letter-spacing: -0.015em;
+                color: var(--adapt-text);
+              }
+
+              :where(p) {
+                margin: 0;
+                color: var(--adapt-muted);
+              }
+
+              :where(button) {
+                appearance: none;
+                border: 1px solid rgba(255, 255, 255, 0.5);
+                background:
+                  linear-gradient(128deg, rgba(255, 255, 255, 0.26), rgba(255, 255, 255, 0.08)),
+                  linear-gradient(140deg, rgba(125, 181, 255, 0.8), rgba(240, 140, 189, 0.68));
+                color: #f6fbff;
+                border-radius: 12px;
+                padding: 9px 14px;
+                font: inherit;
+                font-weight: 700;
+                cursor: pointer;
+                transition: transform 0.14s ease, filter 0.14s ease, box-shadow 0.14s ease;
+                box-shadow:
+                  inset 0 1px 0 rgba(255, 255, 255, 0.52),
+                  0 12px 24px rgba(2, 6, 14, 0.38);
+              }
+
+              :where(button:hover) {
+                transform: translateY(-1px);
+                filter: saturate(1.06) brightness(1.04);
+              }
+
+              :where(button:active) {
+                transform: translateY(0);
+              }
+
+              :where(button:focus-visible) {
+                outline: none;
+                box-shadow: 0 0 0 3px rgba(164, 209, 255, 0.22);
+              }
+
+              :where(input, textarea, select) {
+                width: 100%;
+                border: 1px solid rgba(163, 195, 255, 0.42);
+                background: rgba(8, 14, 28, 0.54);
+                color: var(--adapt-text);
+                border-radius: 12px;
+                padding: 10px 12px;
+                font: inherit;
+              }
+
+              :where(input, textarea, select)::placeholder {
+                color: rgba(194, 212, 244, 0.7);
+              }
+
+              :where(input, textarea, select):focus-visible {
+                outline: none;
+                border-color: rgba(197, 221, 255, 0.82);
+                box-shadow: 0 0 0 3px rgba(120, 182, 255, 0.34);
+              }
+            `,
+            theme: { primary: '#9ecbff', accent: '#f08cbd', surface: 'rgba(255, 255, 255, 0.16)', muted: 'rgba(220, 231, 251, 0.82)', text: '#edf3ff' },
+            data: {
+              metrics: [
+                { label: 'Active users', value: 38210, delta: 6.2 },
+                { label: 'Conversion', value: 4.8, delta: -0.3 },
+                { label: 'MRR', value: 128430, delta: 3.1 }
+              ],
+              chart: [12, 16, 14, 18, 22, 19, 24, 28],
+              colors: ['#7db5ff', '#f08cbd', '#2dd4bf', '#f59e0b']
+            },
+            shortcuts: ['⌘ + K', '⇧ + /', 'Alt to sample data']
+          };
+          const mergedProps = Object.assign({}, defaultProps, props || {});
+          if (mergedProps.styles) {
+            let styleTag = document.getElementById('adapt-style');
+            if (!styleTag) {
+              styleTag = document.createElement('style');
+              styleTag.id = 'adapt-style';
+              document.head.appendChild(styleTag);
+            }
+            styleTag.textContent = mergedProps.styles;
+          }
           const fn = new Function('React','module','exports','props', compiled + '\nreturn module.exports;');
-          const mod = fn(window.React, module, exports, props);
-          const Comp = mod?.default || mod?.Component;
-          if (!Comp) throw new Error('No default export found.');
+          const mod = fn(window.React, module, exports, mergedProps);
+          const fallbackKey = mod && Object.keys(mod).find(k => /^[A-Z]/.test(k) && typeof mod[k] === 'function');
+          const Comp = mod?.default || mod?.Component || mod?.App || (fallbackKey ? mod[fallbackKey] : null);
+          if (!Comp) throw new Error('No exportable component found.');
 
           const rootEl = document.getElementById('root');
-          const root = window.ReactDOM.createRoot(rootEl);
-          const tree = React.createElement(Boundary, null, React.createElement(Comp, props || {}));
+          if (!root) root = window.ReactDOM.createRoot(rootEl);
+          boundaryKey += 1;
+          const tree = React.createElement(Boundary, { key: boundaryKey }, React.createElement(Comp, mergedProps));
           root.render(tree);
 
           parent.postMessage({ type: 'render:ok' }, '*');
@@ -71,7 +406,16 @@
       window.addEventListener('message', (e) => {
         if (!e?.data) return;
         if (e.data.type === 'render') render(e.data.payload);
+        if (e.data.type === 'sandbox:focus') window.focus();
+        if (e.data.type === 'input:key') forwardKeyboardEvent('keydown', e.data.payload);
+        if (e.data.type === 'input:keyup') forwardKeyboardEvent('keyup', e.data.payload);
       });
+
+      window.addEventListener('keydown', (e) => {
+        if (scrollBlockKeys.has(e.key) || scrollBlockKeys.has(e.code)) {
+          e.preventDefault();
+        }
+      }, { passive: false });
     </script>
   </body>
 </html>

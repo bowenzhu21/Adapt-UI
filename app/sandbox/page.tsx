@@ -1,13 +1,301 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { motion } from 'framer-motion';
-import { supabaseBrowser } from '@/lib/supabase-browser';
 import Navbar from '@/components/UI/Navbar';
+import HeroBackdrop3D from '@/components/UI/HeroBackdrop3D';
 
 type Issue = { type: string; message: string };
 
 const MAX_AUTOFIX_ATTEMPTS = 3;
+const MAX_PROMPT_CHARS = 900;
+const SANDBOX_BASE_STYLES = `
+  :root {
+    --adapt-bg: #050a14;
+    --adapt-surface: rgba(255, 255, 255, 0.16);
+    --adapt-surface-soft: rgba(255, 255, 255, 0.1);
+    --adapt-border: rgba(255, 255, 255, 0.36);
+    --adapt-text: #edf3ff;
+    --adapt-muted: rgba(220, 231, 251, 0.82);
+    --adapt-primary: #9ecbff;
+    --adapt-accent: #f08cbd;
+    --adapt-success: #10b981;
+    --adapt-danger: #ff5f74;
+    --adapt-radius: 18px;
+    --adapt-shadow: 0 24px 48px rgba(3, 6, 14, 0.44);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body, #root {
+    margin: 0;
+    width: 100%;
+    min-height: 100%;
+    background: transparent !important;
+  }
+
+  body {
+    font-family: 'IBM Plex Sans', system-ui, sans-serif;
+    color: var(--adapt-text);
+    background: transparent;
+    line-height: 1.5;
+  }
+
+  #root {
+    padding: 18px;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    background: transparent !important;
+  }
+
+  .adapt-shell {
+    width: 100%;
+    max-width: none;
+    margin: 0 auto;
+  }
+
+  .adapt-panel {
+    position: relative;
+    overflow: hidden;
+    background:
+      linear-gradient(150deg, rgba(255, 255, 255, 0.26) 0%, rgba(255, 255, 255, 0.1) 58%, rgba(255, 255, 255, 0.16) 100%);
+    border: 1px solid var(--adapt-border);
+    border-radius: var(--adapt-radius);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.56),
+      inset 0 -1px 0 rgba(255, 255, 255, 0.12),
+      var(--adapt-shadow);
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    padding: 18px;
+  }
+
+  .adapt-panel::before {
+    content: '';
+    position: absolute;
+    inset: 1px;
+    border-radius: inherit;
+    pointer-events: none;
+    background:
+      linear-gradient(120deg, rgba(255, 255, 255, 0.44), rgba(255, 255, 255, 0) 34%),
+      radial-gradient(130% 90% at 0% 100%, rgba(116, 179, 255, 0.18), transparent 52%);
+    opacity: 0.82;
+  }
+
+  .adapt-title {
+    margin: 0;
+    font-size: clamp(1.25rem, 2.2vw, 1.8rem);
+    line-height: 1.2;
+    letter-spacing: -0.015em;
+    color: var(--adapt-text);
+    text-shadow: 0 8px 24px rgba(3, 7, 16, 0.42);
+  }
+
+  .adapt-subtitle {
+    margin: 8px 0 0;
+    color: var(--adapt-muted);
+    font-size: 0.95rem;
+  }
+
+  .adapt-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .adapt-grid {
+    display: grid;
+    gap: 12px;
+  }
+
+  .adapt-board {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(72px, 1fr));
+    gap: 10px;
+    width: min(340px, 100%);
+    padding: 8px;
+    border-radius: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.24);
+    background: rgba(12, 18, 34, 0.44);
+  }
+
+  .adapt-cell {
+    aspect-ratio: 1 / 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.2rem;
+    font-weight: 700;
+    border-radius: 14px;
+    border: 1px solid rgba(171, 209, 255, 0.42);
+    background: linear-gradient(156deg, rgba(125, 181, 255, 0.38), rgba(240, 140, 189, 0.24) 54%, rgba(14, 22, 44, 0.62));
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.34),
+      0 10px 18px rgba(3, 6, 14, 0.36);
+    color: #f8fbff;
+  }
+
+  .adapt-btn,
+  .adapt-btn-ghost {
+    appearance: none;
+    border-radius: 12px;
+    padding: 9px 14px;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.14s ease, filter 0.14s ease, box-shadow 0.14s ease;
+  }
+
+  .adapt-btn {
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    background:
+      linear-gradient(128deg, rgba(255, 255, 255, 0.26), rgba(255, 255, 255, 0.08)),
+      linear-gradient(140deg, rgba(125, 181, 255, 0.8), rgba(240, 140, 189, 0.68));
+    color: #f6fbff;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.52),
+      0 12px 24px rgba(2, 6, 14, 0.38);
+    font-weight: 700;
+  }
+
+  .adapt-btn-ghost {
+    border: 1px solid rgba(255, 255, 255, 0.42);
+    background: rgba(255, 255, 255, 0.16);
+    color: rgba(245, 249, 255, 0.96);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.48);
+    backdrop-filter: blur(12px) saturate(160%);
+    -webkit-backdrop-filter: blur(12px) saturate(160%);
+  }
+
+  .adapt-btn:hover,
+  .adapt-btn-ghost:hover {
+    transform: translateY(-1px);
+    filter: saturate(1.06) brightness(1.04);
+  }
+
+  .adapt-btn:active,
+  .adapt-btn-ghost:active {
+    transform: translateY(0);
+  }
+
+  .adapt-btn:focus-visible,
+  .adapt-btn-ghost:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(164, 209, 255, 0.22);
+  }
+
+  .adapt-input {
+    width: 100%;
+    border: 1px solid rgba(182, 211, 255, 0.46);
+    background: rgba(10, 16, 30, 0.56);
+    color: var(--adapt-text);
+    border-radius: 12px;
+    padding: 10px 12px;
+    font: inherit;
+  }
+
+  .adapt-input::placeholder {
+    color: rgba(205, 218, 240, 0.74);
+  }
+
+  .adapt-input:focus-visible {
+    outline: none;
+    border-color: rgba(210, 230, 255, 0.84);
+    background: rgba(11, 18, 33, 0.74);
+    box-shadow: 0 0 0 3px rgba(120, 182, 255, 0.24);
+  }
+
+  .adapt-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    background: rgba(16, 28, 52, 0.64);
+    color: #f2f7ff;
+    border: 1px solid rgba(163, 195, 255, 0.38);
+  }
+
+  .adapt-kbd {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 8px;
+    border: 1px solid rgba(163, 195, 255, 0.4);
+    background: rgba(12, 18, 34, 0.62);
+    color: #f4f8ff;
+    font-size: 0.78rem;
+    font-weight: 600;
+    padding: 3px 8px;
+    line-height: 1;
+  }
+
+  :where(h1, h2, h3) {
+    margin: 0 0 10px;
+    line-height: 1.2;
+    letter-spacing: -0.015em;
+    color: var(--adapt-text);
+  }
+
+  :where(p) {
+    margin: 0;
+    color: var(--adapt-muted);
+  }
+
+  :where(button) {
+    appearance: none;
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    background:
+      linear-gradient(128deg, rgba(255, 255, 255, 0.26), rgba(255, 255, 255, 0.08)),
+      linear-gradient(140deg, rgba(125, 181, 255, 0.8), rgba(240, 140, 189, 0.68));
+    color: #f6fbff;
+    border-radius: 12px;
+    padding: 9px 14px;
+    font: inherit;
+    font-weight: 700;
+    cursor: pointer;
+    transition: transform 0.14s ease, filter 0.14s ease, box-shadow 0.14s ease;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.52),
+      0 12px 24px rgba(2, 6, 14, 0.38);
+  }
+
+  :where(button:hover) {
+    transform: translateY(-1px);
+    filter: saturate(1.06) brightness(1.04);
+  }
+
+  :where(button:active) {
+    transform: translateY(0);
+  }
+
+  :where(button:focus-visible) {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(164, 209, 255, 0.22);
+  }
+
+  :where(input, textarea, select) {
+    width: 100%;
+    border: 1px solid rgba(163, 195, 255, 0.42);
+    background: rgba(8, 14, 28, 0.54);
+    color: var(--adapt-text);
+    border-radius: 12px;
+    padding: 10px 12px;
+    font: inherit;
+  }
+
+  :where(input, textarea, select)::placeholder {
+    color: rgba(194, 212, 244, 0.7);
+  }
+
+  :where(input, textarea, select):focus-visible {
+    outline: none;
+    border-color: rgba(197, 221, 255, 0.82);
+    box-shadow: 0 0 0 3px rgba(120, 182, 255, 0.34);
+  }
+`;
 
 const safeJson = async (res: Response) => {
   try { return await res.json(); } catch { return null; }
@@ -15,8 +303,10 @@ const safeJson = async (res: Response) => {
 
 export default function SandboxPage() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const isAutoFixingRef = useRef(false);
+  const lastRuntimeFingerprintRef = useRef<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [prompt, setPrompt] = useState('Create a tic tac toe game');
+  const [prompt, setPrompt] = useState('');
   const [currentCode, setCurrentCode] = useState<string | null>(null);
   const [status, setStatus] = useState<string>('Idle');
 
@@ -27,61 +317,64 @@ export default function SandboxPage() {
         code,
         props: {
           title: 'Sandbox Demo',
-          styles: `
-            body {
-              font-family: Arial, sans-serif;
-              margin: 0;
-              padding: 0;
-              display: flex;
-              justify-content: center;
-              align-items: center;
-              height: 100vh;
-              background-color: #f0f0f0;
-            }
-            .game-container {
-              display: flex;
-              flex-direction: column;
-              align-items: center;
-              gap: 1rem;
-            }
-            .restart-button {
-              padding: 0.5rem 1rem;
-              background-color: #007bff;
-              color: white;
-              border: none;
-              border-radius: 5px;
-              cursor: pointer;
-            }
-            .restart-button:hover {
-              background-color: #0056b3;
-            }
-          `,
+          styles: SANDBOX_BASE_STYLES,
+          theme: {
+            primary: '#9ecbff',
+            accent: '#f08cbd',
+            surface: 'rgba(255, 255, 255, 0.16)',
+            muted: 'rgba(220, 231, 251, 0.82)',
+            text: '#edf3ff'
+          },
+          data: {
+            metrics: [
+              { label: 'Active users', value: 38210, delta: 6.2 },
+              { label: 'Conversion', value: 4.8, delta: -0.3 },
+              { label: 'MRR', value: 128430, delta: 3.1 }
+            ],
+            chart: [12, 16, 14, 18, 22, 19, 24, 28],
+            colors: ['#7db5ff', '#f08cbd', '#2dd4bf', '#f59e0b']
+          },
+          shortcuts: ['⌘ + K command palette', '⇧ + / help', 'Hold Alt to sample data'],
         },
       },
     }, '*');
+    window.setTimeout(() => {
+      iframeRef.current?.focus();
+      iframeRef.current?.contentWindow?.postMessage({ type: 'sandbox:focus' }, '*');
+    }, 0);
   }, []);
 
-  const logFix = useCallback(async (params: { componentId?: string; error_message: string; fix_summary: string; success: boolean }) => {
-    const { componentId, error_message, fix_summary, success } = params;
-    try {
-      const supabase = supabaseBrowser();
-      await supabase.from('error_log').insert({
-        component_id: componentId || null,
-        error_message,
-        fix_summary,
-        success
-      });
-    } catch {}
+  const postKeyToSandbox = useCallback((type: 'input:key' | 'input:keyup', event: KeyboardEvent) => {
+    iframeRef.current?.contentWindow?.postMessage({
+      type,
+      payload: {
+        key: event.key,
+        code: event.code,
+        altKey: event.altKey,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        shiftKey: event.shiftKey,
+        repeat: event.repeat
+      }
+    }, '*');
   }, []);
 
-  const autoFix = useCallback(async (code: string, startingIssues: Issue[] = [], runtimeError?: string) => {
+  const logFix = useCallback(
+    (_params: { componentId?: string; error_message: string; fix_summary: string; success: boolean }) => {
+      void _params;
+      return Promise.resolve();
+    },
+    []
+  );
+
+  const autoFix = useCallback(async (code: string, startingIssues: Issue[] = [], runtimeError?: string): Promise<boolean> => {
     setError(null);
     let attempt = 0;
     let working = code;
     let issues = startingIssues;
     let runtimeMsg = runtimeError;
 
-    while (attempt < MAX_AUTOFIX_ATTEMPTS + 2) { // Increased attempts for better debugging
+    while (attempt < MAX_AUTOFIX_ATTEMPTS) {
       attempt += 1;
       let patched = working;
       try {
@@ -96,6 +389,15 @@ export default function SandboxPage() {
         }
         const dbg = await safeJson(dbgRes);
         patched = typeof dbg?.code === 'string' ? dbg.code : working;
+        if (patched.trim() === working.trim()) {
+          setError('Auto-fix returned unchanged code.');
+          await logFix({
+            error_message: runtimeMsg || issues.map(i => i.message).join(' | ') || 'debugger unchanged output',
+            fix_summary: `autofix attempt ${attempt} unchanged`,
+            success: false
+          });
+          break;
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
@@ -133,12 +435,13 @@ export default function SandboxPage() {
       if (val?.valid) {
         setCurrentCode(patched);
         postToSandbox(patched);
+        lastRuntimeFingerprintRef.current = null;
         await logFix({
           error_message: runtimeMsg || issues.map(i => i.message).join(' | ') || 'validator issues',
           fix_summary: `autofix attempt ${attempt} succeeded`,
           success: true
         });
-        return;
+        return true;
       }
 
       await logFix({
@@ -151,25 +454,40 @@ export default function SandboxPage() {
       runtimeMsg = undefined;
     }
 
-    setError('Auto-fix failed after extended attempts.');
+    setError('Auto-fix failed after max attempts.');
     await logFix({
       error_message: 'autofix exhausted',
       fix_summary: 'autofix attempts exhausted',
       success: false
     });
+    return false;
   }, [logFix, postToSandbox]);
 
   useEffect(() => {
     const onMsg = async (e: MessageEvent) => {
+      if (e.source !== iframeRef.current?.contentWindow) return;
       if (e.data?.type === 'render:ok') {
         setError(null);
+        setStatus('ok');
+        lastRuntimeFingerprintRef.current = null;
       }
       if (e.data?.type === 'render:error') {
         const msg = e.data?.message || 'Runtime error';
-        if (currentCode) {
-          await autoFix(currentCode, [], msg);
+        const fingerprint = `${currentCode || ''}::${msg}`;
+        if (fingerprint === lastRuntimeFingerprintRef.current) return;
+        lastRuntimeFingerprintRef.current = fingerprint;
+        if (currentCode && !isAutoFixingRef.current) {
+          try {
+            isAutoFixingRef.current = true;
+            setStatus('autofixing');
+            const fixed = await autoFix(currentCode, [], msg);
+            setStatus(fixed ? 'ok' : 'error');
+          } finally {
+            isAutoFixingRef.current = false;
+          }
         } else {
           setError(msg);
+          setStatus('error');
         }
       }
     };
@@ -177,14 +495,80 @@ export default function SandboxPage() {
     return () => window.removeEventListener('message', onMsg);
   }, [autoFix, currentCode]);
 
+  useEffect(() => {
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+    const focusSandbox = () => {
+      iframe.focus();
+      iframe.contentWindow?.postMessage({ type: 'sandbox:focus' }, '*');
+    };
+    iframe.addEventListener('pointerdown', focusSandbox);
+    return () => iframe.removeEventListener('pointerdown', focusSandbox);
+  }, []);
+
+  useEffect(() => {
+    const keyCodes = new Set([
+      'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+      'KeyW', 'KeyA', 'KeyS', 'KeyD',
+      'Space', 'KeyR', 'Enter', 'Escape'
+    ]);
+    const scrollKeys = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space']);
+
+    const isEditableTarget = (target: EventTarget | null) => {
+      const el = target as HTMLElement | null;
+      if (!el) return false;
+      const tag = el.tagName;
+      return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+    };
+
+    const shouldForward = (event: KeyboardEvent) => {
+      if (isEditableTarget(event.target)) return false;
+      if (keyCodes.has(event.code)) return true;
+      return /^(w|a|s|d|W|A|S|D|r|R)$/.test(event.key);
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!shouldForward(event)) return;
+      if (scrollKeys.has(event.code) || event.key === ' ') {
+        event.preventDefault();
+      }
+      postKeyToSandbox('input:key', event);
+    };
+
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (!shouldForward(event)) return;
+      postKeyToSandbox('input:keyup', event);
+    };
+
+    window.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('keyup', onKeyUp, true);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('keyup', onKeyUp, true);
+    };
+  }, [postKeyToSandbox]);
+
   const handleGenerate = async () => {
+    const trimmedPrompt = prompt.trim();
+    if (!trimmedPrompt) {
+      setStatus('error');
+      setError('Please enter a prompt.');
+      return;
+    }
+    if (trimmedPrompt.length > MAX_PROMPT_CHARS) {
+      setStatus('error');
+      setError(`Prompt exceeds ${MAX_PROMPT_CHARS} characters.`);
+      return;
+    }
+
     setStatus('generating');
     setError(null);
+    lastRuntimeFingerprintRef.current = null;
     try {
       const genRes = await fetch('/api/generate-component', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt })
+        body: JSON.stringify({ prompt: trimmedPrompt })
       });
       if (!genRes.ok) {
         const txt = await genRes.text().catch(() => '');
@@ -210,7 +594,11 @@ export default function SandboxPage() {
         postToSandbox(gen.code);
         setStatus('ok');
       } else {
-        throw new Error('Validation failed.');
+        // Attempt auto-fix immediately when validation fails
+        setStatus('autofixing');
+        const issues = Array.isArray(val?.issues) ? val.issues : [];
+        const fixed = await autoFix(gen.code, issues);
+        setStatus(fixed ? 'ok' : 'error');
       }
     } catch (e) {
       setStatus('error');
@@ -218,84 +606,67 @@ export default function SandboxPage() {
     }
   };
 
-  const handleError = useCallback((error: string) => {
-    setError(error);
-    alert(`An error occurred: ${error}`);
-  }, []);
-
-  useEffect(() => {
-    window.addEventListener('message', (event) => {
-      if (event.data.type === 'error') {
-        handleError(event.data.payload.message);
-      }
-    });
-
-    return () => {
-      window.removeEventListener('message', (event) => {
-        if (event.data.type === 'error') {
-          handleError(event.data.payload.message);
-        }
-      });
-    };
-  }, [handleError]);
-
-  // Restored 'saveConfiguration' function
-  const saveConfiguration = useCallback(() => {
-    if (currentCode) {
-      localStorage.setItem('sandboxConfig', JSON.stringify({ code: currentCode }));
-      alert('Configuration saved!');
-    }
-  }, [currentCode]);
-
-  // Restored 'loadConfiguration' function
-  const loadConfiguration = useCallback(() => {
-    const savedConfig = localStorage.getItem('sandboxConfig');
-    if (savedConfig) {
-      const { code } = JSON.parse(savedConfig);
-      setCurrentCode(code);
-      postToSandbox(code);
-      alert('Configuration loaded!');
-    } else {
-      alert('No saved configuration found.');
-    }
-  }, [postToSandbox]);
+  const normalizedStatus = status.toLowerCase();
+  const statusClassName = `status-pill ${
+    normalizedStatus === 'ok'
+      ? 'status-pill-ok'
+      : normalizedStatus === 'error'
+        ? 'status-pill-error'
+        : normalizedStatus === 'autofixing'
+          ? 'status-pill-warn'
+          : ''
+  }`;
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5 }}>
-      <main className="py-6">
-        <Navbar />
+    <main className="immersive-page sandbox-page">
+      <HeroBackdrop3D className="hero-three hero-three-sandbox" />
+      <div className="hero-sheen sandbox-sheen" aria-hidden="true" />
+      <div className="hero-vignette" aria-hidden="true" />
 
-        <section className="glass p-6 mt-4 space-y-4">
-          <h1 className="text-2xl font-bold">Sandbox</h1>
-          <p className="text-sm text-white/70">
-            We code, validate, and auto-repair. Type a prompt to generate a component.
-          </p>
+      <div className="page-frame">
+        <Navbar minimal />
 
-          <textarea
-            className="input h-28"
-            value={prompt}
-            onChange={(e)=>setPrompt(e.target.value)}
-          />
-          <div className="flex items-center gap-3">
-            <button onClick={handleGenerate} className="btn-primary">Generate UI</button>
-            <button onClick={saveConfiguration} className="btn-secondary">Save Configuration</button>
-            <button onClick={loadConfiguration} className="btn-secondary">Load Configuration</button>
-            <span className="text-sm">Status: {status}{error ? ` — ${error}` : ''}</span>
-          </div>
-        </section>
+        <div className="sandbox-stack">
+          <section className="sandbox-controls">
+            <div className="sandbox-header">
+              <div>
+                <h1 className="sandbox-title">Sandbox</h1>
+                <p className="sandbox-subtitle">Prompt, generate, validate, and live render.</p>
+              </div>
+              <div className={statusClassName}>Status: {status}</div>
+            </div>
 
-        <section className="glass p-2 mt-4">
-          <iframe
-            ref={iframeRef}
-            src="/sandbox.html"
-            sandbox="allow-scripts"
-            className="sandbox-iframe"
-            style={{ width: '100%', height: '500px', border: 'none' }}
-          />
-        </section>
+            <div className="space-y-3">
+              <textarea
+                className="input sandbox-input"
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                maxLength={MAX_PROMPT_CHARS}
+                placeholder="Describe the component you want to generate."
+              />
+              <div className="sandbox-meta">
+                <span>{prompt.length}/{MAX_PROMPT_CHARS}</span>
+                <span>Auto-fix max: {MAX_AUTOFIX_ATTEMPTS}</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button onClick={handleGenerate} className="btn-primary">Generate</button>
+              </div>
+              {error && <p className="sandbox-error">{error}</p>}
+            </div>
+          </section>
 
-        {error && <div className="error-message">{error}</div>}
-      </main>
-    </motion.div>
+          <section className="sandbox-output">
+            <iframe
+              ref={iframeRef}
+              src="/sandbox.html"
+              sandbox="allow-scripts"
+              scrolling="auto"
+              tabIndex={0}
+              className="sandbox-frame"
+            />
+          </section>
+        </div>
+      </div>
+    </main>
   );
 }
